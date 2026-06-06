@@ -1,9 +1,16 @@
 MODEL:
   PRECISION: ""
   CHECKPOINT_PATH: ""
+  GPT_MODEL:
+    config_path: "configs/rxngpt_llama1B.json"
+    n_layer: 24
+    n_head: 16
+    n_embd: 2048
 
 DATA:
   DATA_ROOT: ""
+  MAX_ATOM_NUM: 512
+  MAX_LEN: 512
 
 SOLVER:
   OPTIMIZER_NAME: "AdamW"

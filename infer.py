@@ -1,15 +1,15 @@
 import re
 import time
+
 import torch
-from tqdm import tqdm
-from rdkit import Chem
 import torch.nn.functional as F
+from rdkit import Chem
 
-from models.rxngpt import  RxnGPT
-from utils.utils import args_parse
+from models.rxngpt import RxnGPT
 from tokenizer.tokenization import SMILESBPETokenizer
+from utils.utils import args_parse
 
-device = 'cuda:1'
+device = 'cpu'
 
 def deduplicate(data):
     seen = set()
@@ -119,7 +119,11 @@ def jiexi(input_texts):
     return  results
 
 class RSGPT:
-    def __init__(self,model_path='models/rxngpt_ready.pt', cfg_path='base.yml', tokenizer_path='tokenizer/t.json'):
+    def __init__(self,
+        model_path='models/finetune_full.pth',  # rxngpt_ready.pt',
+        cfg_path='base.yml',
+        tokenizer_path='vocab.json',
+        ):
 
         self.maxlen = 100
         self.tokenizer = SMILESBPETokenizer.get_hf_tokenizer(tokenizer_path, model_max_length=self.maxlen)

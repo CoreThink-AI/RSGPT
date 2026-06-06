@@ -1,41 +1,21 @@
-import os
-import torch
-from utils.utils import args_parse
-from models.rxngpt import  RxnGPT
-from tqdm import tqdm
-import torch.nn.functional as F
-import torch.distributions as D
 
-import re
-from rdchiral.main import rdchiralRun, rdchiralReaction, rdchiralReactants
+import torch
+import torch.nn.functional as F
 from rdkit import Chem
+from tqdm import tqdm
 
-import lmdb
-import pickle
-import os
-
-import torch
-import logging
-import argparse
-import wandb
-import shutil
-
-from utils.utils import args_parse, seed_everything
-from task import Task, Trainer
+from models.rxngpt import RxnGPT
 from tokenizer.tokenization import SMILESBPETokenizer
-import pandas as pd
-
-import torch
-import torch.nn.functional as F
-
+from utils.utils import args_parse
 
 device = 'cuda:0'
 
-def write2txt(data_name = '50k',\
-              pt_path = '/home/xinda/codes/rxn_finetune/save/finetune_50k/train_epoch_3.pth',\
-              label=False,\
-              test_aug=False
-              ):
+def write2txt(
+    data_name = '50k',
+    pt_path = '/home/xinda/codes/rxn_finetune/save/finetune_50k/train_epoch_3.pth',
+    label=False,
+    test_aug=False
+    ):
 
 
 
@@ -61,35 +41,35 @@ def write2txt(data_name = '50k',\
     def beam_search_gpt(model, tokenizer, s, beam_size=10, max_length=50,device=device,deduolicated = False):
         # input_ids = tokenizer.encode(s, add_special_tokens=False)
         input_ids = torch.tensor(s).unsqueeze(0).to(device)
-        
+
         sequences = [(input_ids, 0.0)]  # 每个元素为 (序列, 累积得分)
         end_token_id = tokenizer.encode('</s>', add_special_tokens=False)[0]
-        
+
         completed_sequences = []
-        
+
         for _ in range(max_length):
             all_candidates = []
             for seq, score in sequences:
                 if seq[0, -1].item() == end_token_id:
                     completed_sequences.append((seq, score))
                     continue
-                
+
                 logits = model.infer(input_ids=seq).logits[:, -1, :]
                 logits = F.log_softmax(logits, dim=-1)
-                
+
                 topk_probs, topk_indices = torch.topk(logits, beam_size, dim=-1)
-                
+
                 for i in range(beam_size):
                     candidate_seq = torch.cat([seq, topk_indices[:, i].unsqueeze(0)], dim=1)
                     candidate = (candidate_seq, score - topk_probs[0, i].item())
                     all_candidates.append(candidate)
-            
+
             ordered = sorted(all_candidates, key=lambda tup: tup[1])
             sequences = ordered[:beam_size]
-        
+
         completed_sequences.extend(sequences)
         completed_sequences = sorted(completed_sequences, key=lambda tup: tup[1])
-        
+
         decoded_sequences = [tokenizer.decode(seq[0].squeeze().tolist()) for seq in completed_sequences]
         if deduolicated:
             decoded_sequences = deduplicate(decoded_sequences)[:beam_size]
@@ -99,8 +79,8 @@ def write2txt(data_name = '50k',\
             decoded_sequences.append('C')
         return decoded_sequences
 
-    cfg = args_parse('/home/xinda/R/configs/rxngpt.yml')
-    tokenizer = SMILESBPETokenizer.get_hf_tokenizer("t.json", model_max_length=maxlen)
+    cfg = args_parse('rxngpt_llama1B.json')
+    tokenizer = SMILESBPETokenizer.get_hf_tokenizer("tokenizer/tokenizer.json", model_max_length=maxlen)
 
 
 
@@ -126,7 +106,7 @@ def write2txt(data_name = '50k',\
             line = line.strip().replace('\n','')
             if line:
                 pre = tokenizer.encode(line,add_special_tokens=False)
-                prefixs.append(pre)    
+                prefixs.append(pre)
 
 
     # with open('/home/xinda/make_data/vocab2num.pkl','rb') as f:
@@ -169,10 +149,10 @@ if __name__ == '__main__':
     #         )
 
     # # pretrain
-    write2txt(\
-        data_name = '50k',\
-        pt_path = '/home/xinda/codes/rxn_finetune/save/finetune_50k_label/train_epoch_2.pth',\
+    write2txt(
+        data_name = '50k',
+        pt_path = '/home/home/code/corethink/RSGPT/models/finetune_full.pth',
         label=True,
         test_aug=False
-            )
-    
+        )
+
