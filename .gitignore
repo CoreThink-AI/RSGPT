@@ -7,6 +7,8 @@ bigdata/
 data/synthetic_data/
 data/test_aug_datas/pred_test_aug20_scores.json
 
+*.safetensors
+*.gguf
 *.pth
 *.pt
 *.duckdb
