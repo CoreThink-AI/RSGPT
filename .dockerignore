@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+.git
+data/
+models/*.pth
+*.pth
+*.pt
+*.egg-info
+.workon

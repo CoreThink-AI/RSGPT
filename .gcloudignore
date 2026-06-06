@@ -1,0 +1,79 @@
+# gcloud will use this to determine what NOT to upload to Cloud Build.
+# Mirrors .gitignore plus extra dev/runtime stuff.
+
+.git/
+.gitignore
+.gcloudignore
+.github/
+
+# Large model and data files — not needed in build context
+**/bigmodels
+**/bigdata
+**/data
+
+# Virtualenvs
+.venv*/
+venv/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Dev / CI / docs
+docs/
+tests/
+outputs/
+*.log
+*.csv
+# Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Local outputs / test artifacts
+output.json*
+cli_output.json
+service_output.json
+smiles*.txt
+trees.json
+
+# Large model files
+*.onnx
+*.h5
+*.ckpt
+*.pt
+*.pth
+# .hdf5 files: keep the data/ directory (stock files) but ignore root-level
+/*.hdf5
+
+# Docs
+docs/
+
+# Misc
+.DS_Store
+*.log
+
+data/
+*.pth
+*.pt

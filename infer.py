@@ -1,3 +1,4 @@
+import os
 import re
 import time
 
@@ -9,7 +10,7 @@ from models.rxngpt import RxnGPT
 from tokenizer.tokenization import SMILESBPETokenizer
 from utils.utils import args_parse
 
-device = 'cpu'
+device = os.environ.get('DEVICE', 'cuda:0' if torch.cuda.is_available() else 'cpu')
 
 def deduplicate(data):
     seen = set()
@@ -120,9 +121,9 @@ def jiexi(input_texts):
 
 class RSGPT:
     def __init__(self,
-        model_path='models/finetune_full.pth',  # rxngpt_ready.pt',
+        model_path=os.environ.get('MODEL_PATH', 'models/finetune_full.pth'),
         cfg_path='base.yml',
-        tokenizer_path='vocab.json',
+        tokenizer_path=os.environ.get('TOKENIZER_PATH', 'vocab.json'),
         ):
 
         self.maxlen = 100
@@ -143,22 +144,25 @@ class RSGPT:
         # self.model.half().eval()
         print(f'模型加载完毕！耗时{time.time()-t1:.2f}s')
 
-    def predict(self, smiles):
+    def predict(self, smiles, beam_size=10):
         t0 = time.time()
         m = Chem.MolFromSmiles(smiles)
         std_smiles = Chem.MolToSmiles(m)
-        output_sequence = beam_search_gpt(self.model, self.tokenizer, std_smiles, beam_size=10, max_length=self.maxlen, device=device)
+        output_sequence = beam_search_gpt(self.model, self.tokenizer, std_smiles, beam_size=beam_size, max_length=self.maxlen, device=device)
         t1 = time.time()
         print(f'推理耗时：{t1-t0:.2f}s')
         out_smiles = jiexi(output_sequence)
-        # out_smiles = output_sequence
         print(f'解析耗时：{t1 - t0:.2f}s')
         return out_smiles
 
 if __name__ == '__main__':
-    gpt = RSGPT()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--beam_size', type=int, default=10)
+    parser.add_argument('--smiles', type=str, default='N#CC1=C(OCC(C)C)C=CC(C2=NC(C)=C(C(O)=O)S2)=C1')
+    args = parser.parse_args()
 
-    smiles = 'N#CC1=C(OCC(C)C)C=CC(C2=NC(C)=C(C(O)=O)S2)=C1'
-    print(gpt.predict(smiles))
+    gpt = RSGPT()
+    print(gpt.predict(args.smiles, beam_size=args.beam_size))
 
 
