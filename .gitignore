@@ -1,21 +1,25 @@
 # AI
 CLAUDE.md
 AGENT*.md
+
 # LFS
+bigdata/
+data/synthetic_data/
+data/test_aug_datas/pred_test_aug20_scores.json
+
 *.pth
 *.pt
 *.duckdb
+*.zip
 *.7z
-# *.hdf5
-# *.zip
-bigdata/
+*.hdf5
+*.txt.gz
 *.csv.gz
 *.ttl.gz
 *.ttl.gz.part*
 *.deb
-**/data/csvs/*.csv*
 .xdp*
-*.head100
+
 # pubmed citations list (titles and authors)
 data/*.xml.gz  
 
