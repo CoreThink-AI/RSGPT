@@ -10,10 +10,10 @@ import wandb
 
 
 
-save_folder_path = ''
+save_folder_path = 'checkpoints'
 valid = True
 
-os.makedirs(save_folder_path,exist_ok=True)
+os.makedirs(save_folder_path, exist_ok=True)
 class Trainer(object):
     def __init__(self, task, cfg):
         wandb.init(project="project name")

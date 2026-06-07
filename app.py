@@ -1,152 +1,137 @@
+"""
+RSGPT retrosynthesis API.
+Tokenizes SMILES with vocab.json, sends token IDs to llama-server's /completion
+endpoint, decodes the output, and parses into reaction SMILES.
+"""
 import json
-import re
 import os
-from contextlib import asynccontextmanager
+import re
 from pathlib import Path
-from typing import Optional
+from contextlib import asynccontextmanager
 
-import numpy as np
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from rdkit import Chem
-from llama_cpp import Llama
+from tokenizers import Tokenizer as HFTokenizer
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-GGUF_PATH  = os.getenv("GGUF_PATH",  "rsgpt.gguf")
-VOCAB_PATH = os.getenv("VOCAB_PATH", "vocab.json")
-N_THREADS  = int(os.getenv("N_THREADS", os.cpu_count() or 4))
-N_CTX      = 128   # max context length; SMILES prompts are short
+# ── Config ────────────────────────────────────────────────────────────────────
+VOCAB_PATH  = os.getenv("VOCAB_PATH",  "vocab.json")
+LLAMA_PORT  = os.getenv("LLAMA_PORT",  "8181")
+LLAMA_URL   = f"http://127.0.0.1:{LLAMA_PORT}"
+EOS_ID      = 2   # </s>
+MAX_TIMEOUT = 300  # seconds per request
 
-# ── Globals set at startup ────────────────────────────────────────────────────
-llm:    Optional[Llama] = None
-id2tok: dict[int, str]  = {}
-tok2id: dict[str, int]  = {}
-EOS_ID = 2   # </s>
+# ── Tokenizer (loaded once at startup) ───────────────────────────────────────
+_tokenizer: HFTokenizer = None
+_id2tok: dict[int, str] = {}
 
-# ── Tokenizer helpers ─────────────────────────────────────────────────────────
 
-def load_vocab(path: str):
-    global id2tok, tok2id
-    data = json.loads(Path(path).read_text())
-    vocab = data["model"]["vocab"]
-    tok2id.update(vocab)
-    id2tok.update({v: k for k, v in vocab.items()})
-    # also index added_tokens so special tokens round-trip cleanly
-    for entry in data.get("added_tokens", []):
-        tok2id[entry["content"]] = entry["id"]
-        id2tok[entry["id"]] = entry["content"]
+def _load_tokenizer():
+    global _tokenizer, _id2tok
+    _tokenizer = HFTokenizer.from_file(VOCAB_PATH)
+    vocab_data = json.loads(Path(VOCAB_PATH).read_text())
+    vocab = vocab_data["model"]["vocab"]
+    _id2tok = {v: k for k, v in vocab.items()}
+    for entry in vocab_data.get("added_tokens", []):
+        _id2tok[entry["id"]] = entry["content"]
 
 
 def encode(text: str) -> list[int]:
-    """Tokenize a pre-formatted prompt string using the BPE vocab.
-    Falls back to character-level for unknown tokens."""
-    from tokenizers import Tokenizer as HFTokenizer
-    _tok = HFTokenizer.from_file(VOCAB_PATH)
-    return _tok.encode(text, add_special_tokens=False).ids
+    return _tokenizer.encode(text, add_special_tokens=False).ids
 
 
 def decode_ids(ids: list[int]) -> str:
-    return "".join(id2tok.get(i, "") for i in ids)
+    return "".join(_id2tok.get(i, "") for i in ids)
 
-# ── Beam search over llama-cpp eval/scores ────────────────────────────────────
 
-def beam_search(prompt_ids: list[int], beam_size: int, max_new: int) -> list[str]:
+# ── llama-server client ────────────────────────────────────────────────────────
+
+async def _complete(
+    client: httpx.AsyncClient,
+    prompt_ids: list[int],
+    max_new_tokens: int,
+    temperature: float = 0.0,
+    top_k: int = 1,
+) -> list[int]:
     """
-    Returns up to beam_size decoded strings (prompt stripped).
-    Uses llama-cpp-python's low-level eval() + scores to implement beam search.
-    Each beam re-evaluates from scratch (no KV-cache sharing), which is fine
-    for the short SMILES sequences this model generates.
+    Call llama-server /completion with token IDs as the prompt.
+    Returns list of generated token IDs (not including the prompt).
     """
-    from copy import deepcopy
+    payload = {
+        "prompt":      prompt_ids,   # llama-server accepts int[] directly
+        "n_predict":   max_new_tokens,
+        "temperature": temperature,
+        "top_k":       top_k,
+        "stop":        [],
+        "stream":      False,
+    }
+    resp = await client.post(
+        f"{LLAMA_URL}/completion",
+        json=payload,
+        timeout=MAX_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
-    # Each beam: (token_ids, cumulative_log_prob, finished)
-    beams: list[tuple[list[int], float, bool]] = [(list(prompt_ids), 0.0, False)]
-    completed: list[tuple[list[int], float]] = []
+    # Response contains generated text; we need token IDs.
+    # llama-server returns token IDs in "tokens" when "tokenize": true is set,
+    # or we re-tokenize the generated text. The simpler path: re-encode.
+    generated_text = data.get("content", "")
+    return encode(generated_text) if generated_text else []
 
-    for _ in range(max_new):
-        active = [(ids, sc) for ids, sc, done in beams if not done]
-        if not active:
-            break
 
-        candidates: list[tuple[list[int], float]] = []
-        for ids, score in active:
-            # Evaluate full sequence (llama-cpp resets KV cache each call)
-            llm.reset()
-            llm.eval(ids)
-
-            # Raw logits for the last position → log-softmax
-            logits = np.array(llm.scores[len(ids) - 1], dtype=np.float64)
-            logits -= logits.max()
-            log_probs = logits - np.log(np.exp(logits).sum())
-
-            top_ids = np.argsort(log_probs)[::-1][: beam_size + 5]
-            for tid in top_ids:
-                candidates.append((ids + [int(tid)], score + log_probs[tid]))
-
-        # Keep best beam_size, separate finished from active
-        candidates.sort(key=lambda x: -x[1])
-        beams = []
-        for ids, sc in candidates[: beam_size * 2]:
-            if ids[-1] == EOS_ID:
-                completed.append((ids, sc))
-            else:
-                if len(beams) < beam_size:
-                    beams.append((ids, sc, False))
-
-        if len(completed) >= beam_size:
-            break
-
-    # Collect any unfinished beams too
-    for ids, sc, _ in beams:
-        completed.append((ids, sc))
-
-    completed.sort(key=lambda x: -x[1])
-
-    # Decode and strip prompt prefix
-    prompt_len = len(prompt_ids)
-    seen: set[str] = set()
+async def beam_search(
+    prompt_ids: list[int],
+    beam_size: int,
+    max_new_tokens: int,
+) -> list[str]:
+    """
+    Run beam_size independent completions and deduplicate.
+    First pass is greedy (temp=0); subsequent passes use temp=0.7 for diversity.
+    """
     results: list[str] = []
-    for ids, _ in completed[:beam_size]:
-        text = decode_ids(ids[prompt_len:]).rstrip("</s>")
-        if text and text not in seen:
-            seen.add(text)
-            results.append(text)
+    seen: set[str] = set()
+
+    async with httpx.AsyncClient() as client:
+        for i in range(beam_size):
+            temperature = 0.0 if i == 0 else 0.7
+            top_k = 1 if i == 0 else 20
+            out_ids = await _complete(client, prompt_ids, max_new_tokens, temperature, top_k)
+            text = decode_ids(out_ids).rstrip("</s>").strip()
+            if text and text not in seen:
+                seen.add(text)
+                results.append(text)
 
     return results
 
-# ── Output parsing (mirrors infer.py jiexi) ───────────────────────────────────
 
-def parse_output(raw_outputs: list[str], product_smiles: str) -> list[str]:
+# ── Output parsing ─────────────────────────────────────────────────────────────
+
+def parse_outputs(raw_outputs: list[str], product_smiles: str) -> list[str]:
     """Convert raw model outputs into reaction SMILES: reactants>>product."""
-    results = []
+    reactions = []
     for text in raw_outputs:
-        f_matches = re.findall(r"<F\d+>(.*?)(?=<F|$)", text)
-        if not f_matches:
-            continue
-        reactants = ".".join(m for m in f_matches if m)
+        fragments = re.findall(r"<F\d+>(.*?)(?=<F|$)", text)
+        reactants = ".".join(f for f in fragments if f)
         if reactants:
-            results.append(f"{reactants}>>{product_smiles}")
-    return results
+            reactions.append(f"{reactants}>>{product_smiles}")
+    return reactions
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+
+# ── FastAPI ────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global llm
-    load_vocab(VOCAB_PATH)
-    llm = Llama(
-        model_path=GGUF_PATH,
-        n_ctx=N_CTX,
-        n_threads=N_THREADS,
-        n_gpu_layers=0,   # CPU only; set >0 if ROCm/CUDA available
-        verbose=False,
-        logits_all=True,  # required to read scores at every position
-    )
+    _load_tokenizer()
+    # Verify llama-server is reachable before accepting traffic
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{LLAMA_URL}/health", timeout=10)
+        resp.raise_for_status()
     yield
-    del llm
 
 
-app = FastAPI(title="RSGPT Retrosynthesis (llama.cpp)", version="2.0")
+app = FastAPI(title="RSGPT Retrosynthesis", version="3.0", lifespan=lifespan)
 
 
 class PredictRequest(BaseModel):
@@ -162,35 +147,35 @@ class PredictResponse(BaseModel):
 
 
 @app.post("/predict", response_model=PredictResponse)
-def predict(req: PredictRequest):
-    # Validate and canonicalize SMILES
+async def predict(req: PredictRequest):
     mol = Chem.MolFromSmiles(req.smiles)
     if mol is None:
         raise HTTPException(status_code=422, detail=f"Invalid SMILES: {req.smiles!r}")
     canonical = Chem.MolToSmiles(mol)
 
-    # Build prompt: <s><Isyn><O>{smiles}<F1>
     prompt = f"<s><Isyn><O>{canonical}<F1>"
-    try:
-        prompt_ids = encode(prompt)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Tokenization error: {e}")
+    prompt_ids = encode(prompt)
 
-    # Run beam search
     try:
-        raw_outputs = beam_search(prompt_ids, req.beam_size, req.max_new_tokens)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Inference error: {e}")
+        raw_outputs = await beam_search(prompt_ids, req.beam_size, req.max_new_tokens)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"llama-server error: {e}")
 
-    reactions = parse_output(raw_outputs, canonical)
+    reactions = parse_outputs(raw_outputs, canonical)
     return PredictResponse(smiles=req.smiles, canonical_smiles=canonical, reactions=reactions)
 
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "model": GGUF_PATH}
+async def health():
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{LLAMA_URL}/health", timeout=5)
+            llama_ok = resp.status_code == 200
+    except Exception:
+        llama_ok = False
+    return {"status": "ok" if llama_ok else "degraded", "llama_server": llama_ok}
 
 
 @app.get("/")
 def root():
-    return {"message": "RSGPT retrosynthesis API. POST /predict with {smiles, beam_size}"}
+    return {"message": "POST /predict with {smiles, beam_size, max_new_tokens}"}

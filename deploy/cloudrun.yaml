@@ -1,0 +1,62 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rsgpt
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Keep one instance warm to avoid cold-start model load (~60s)
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "3"
+        # GCS volume mount — model file appears at /models/rsgpt.gguf
+        run.googleapis.com/volumes: >
+          [{
+            "name": "rsgpt-models",
+            "gcs": {
+              "bucket": "biochem-db-by-hobs-rsgpt-models",
+              "readOnly": true
+            }
+          }]
+    spec:
+      # Increase startup timeout for model load
+      timeoutSeconds: 300
+      containerConcurrency: 4
+      containers:
+        - image: gcr.io/PROJECT_ID/rsgpt:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MODEL_PATH
+              value: /models/rsgpt.gguf
+            - name: VOCAB_PATH
+              value: /app/vocab.json
+            - name: LLAMA_PORT
+              value: "8181"
+            - name: N_CTX
+              value: "512"
+            - name: N_THREADS
+              value: "4"
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: rsgpt-models
+              mountPath: /models
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 18   # 60s + 18×10s = 3 min total
+      volumes:
+        - name: rsgpt-models
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            readOnly: true
+            volumeAttributes:
+              bucketName: biochem-db-by-hobs-rsgpt-models
